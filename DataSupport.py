@@ -142,8 +142,10 @@ def binaryconvert(col):
 
 
 
-def unique_E(arr):
-    return len(filter(lambda x: x == "Genotype confirmed",arr)),len(arr)
+def unique_A(arr):
+    return len(filter(lambda x: x == "Genotype confirmed",arr))
+def unique_G(arr):
+    return len(filter(lambda x: x == "Micro-injection aborted",arr))
 def first(arr):
     return list(arr)[0]
     
@@ -153,7 +155,8 @@ if __name__ == "__main__":
     
 
     cols=dfs.columns
-
+    dfs['Genotype confirmed']=dfs[['Status Name']].copy()
+    dfs['Micro-injection aborted']=dfs[['Status Name']].copy()
     grouped = dfs.groupby('Gene Marker Symbol_x')
     groupeddf=grouped.agg({
             'Gene MGI Accession ID_x':first,
@@ -171,13 +174,19 @@ if __name__ == "__main__":
             '#G0 HDR event detected': sum,
             '#G0 all donor insertions detected': sum,
             '#G0 subset of donors inserted detected': sum,
-            'Status Name':unique_E,
+            'Genotype confirmed':unique_G,
+            'Micro-injection aborted':unique_A,
             'Viability':first
             })
-    print groupeddf['Viability']
-    vib=groupeddf[groupeddf['Viability'].isin(['Viable','Subviable','Lethal'])]
-    subset=vib[['Gene MGI Accession ID_x','Viability']].copy()
-    subset.to_excel("C:/Users/CLARG38/Downloads/PlayDate/Viability.xlsx")
+    cols=groupeddf.columns
+    newdf=pd.DataFrame(groupeddf,columns=cols)
+
+    #subset=newdf[newdf['Genotype confirmed'] != 0 | newdf['Micro-injection aborted'] != 0]
+    print newdf
+    #print groupeddf['Viability']
+    #vib=groupeddf[groupeddf['Viability'].isin(['Viable','Subviable','Lethal'])]
+    #subset=vib[['Gene MGI Accession ID_x','Viability']].copy()
+    newdf.to_excel("C:/Users/CLARG38/Downloads/PlayDate/Aggregated.xlsx")
 #            'number A': 'sum',
 #            'number B': 'min'})
 

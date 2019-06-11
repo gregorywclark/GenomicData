@@ -26,11 +26,13 @@ class Annotation():
     def __init__(self,genelist=[]):
         self.genelist=genelist
         self.definedgenes=bool(len(genelist))
-        self.fileprefix='_partial' if len(genelist) > 0 else ''
+        self.fileprefix='_partial' if len(genelist) > 0 else '_all'
         self.chromosomes=list(map(lambda s: str(s),range(1,20))) + ['X','Y','MT']
         self.genes={}
         self.uid2mgi={}
         self.symbol2mgi={}
+        self.protein2mgi={}
+        self.ensembl2mgi={}
 
         self.reannotate=False
 
@@ -76,14 +78,18 @@ class Annotation():
                         ins.mgi=mgi
                         ins.symbol=symbol
                         ins.proteins=refseq
+                        for protein in refseq:
+                            self.protein2mgi[protein]=mgi
                         self.genes[mgi]=ins
                 else:
-
-                        ins=Gene(symbol)
-                        ins.mgi=mgi
-                        ins.symbol=symbol
-                        ins.proteins=refseq
-                        self.genes[mgi]=ins
+                    ##This means doing ALL genes 
+                    ins=Gene(symbol)
+                    ins.mgi=mgi
+                    ins.symbol=symbol
+                    ins.proteins=refseq
+                    for protein in refseq:
+                        self.protein2mgi[protein]=mgi
+                    self.genes[mgi]=ins
                 
         with open(ncbiInfo) as ncbi:
             ncbi.next()
@@ -101,6 +107,7 @@ class Annotation():
                 self.genes[mgi].uid=uid
                 self.genes[mgi].chromosome=chrom
                 self.genes[mgi].ensembl=ens
+                self.ensembl2mgi[ens]=mgi
                 try:
                     self.genes[mgi].chromosome=chrom
                     self.genes[mgi].start=int(start)
@@ -122,7 +129,21 @@ class Annotation():
                         self.genes[mgi].co_ord=None
  
         self.genes={i:j for i,j in self.genes.iteritems() if j.chromosome and j.co_ord}
-                    
+        
+        if not self.definedgenes:
+            ioA=open(os.path.join(self.prefix,"Processed",'symbol2mgi.pkl'),'wb')
+            ioB=open(os.path.join(self.prefix,"Processed",'uid2mgi.pkl'),'wb')
+            ioC=open(os.path.join(self.prefix,"Processed",'protein2mgi.pkl'),'wb')
+            ioD=open(os.path.join(self.prefix,"Processed",'ensembl2mgi.pkl'),'wb')
+            dump(self.symbol2mgi,ioA)
+            dump(self.uid2mgi,ioB)
+            dump(self.protein2mgi,ioC)
+            dump(self.ensembl2mgi,ioD)
+            ioA.close()
+            ioB.close()
+            ioC.close()
+            ioD.close()
+            
         filehandler=open(filename,'wb')
         dump(self.genes,filehandler)
         filehandler.close()
@@ -137,9 +158,10 @@ class Annotation():
             for line in rif:
                 data=line.strip().split("\t")
                 if data[0] == "10090":  ## ncbi taxonomy id for mouse 
-                    if re.search("lethal|fatal|dead|viable",data[-1])and not re.search("protect|resistance|rescue",data[-1]):
+                    if re.search("lethal|fatal|dead|viable|essential",data[-1]) and not re.search("protect|resistance|rescue",data[-1]):
                         try:
                             ##We have to convert from uid to mgi (our chosen ID) first
+
                             lclmgi=self.uid2mgi[data[1].strip()]
                             self.genes[lclmgi].annotation=data[-1]
                         except KeyError:
@@ -237,6 +259,7 @@ class Annotation():
             promoters[apply_binary] = promoters[apply_binary].applymap(lambda s: binary_func(s))
             promoters.to_excel(promoterfile,index=False)
             self.promoters=promoters
+            
         
         enhancerfile=os.path.join(self.prefix,"Processed",self.fileprefix+"_Enhancers.xlsx")
         if os.path.exists(enhancerfile):
@@ -255,7 +278,12 @@ class Annotation():
                 sheet_dfs = pd.merge(sheet_dfs,lclsheet, how='outer', on=['enhancer', 'gene','TSS','chromosome','transcript'])          
             except NameError:
                 sheet_dfs=lclsheet
-  
+        def defn(x):
+            try:
+                mgi=self.symbol2mgi[x]
+            except KeyError:
+                mgi=''
+        sheet_dfs['MGI_ID']=sheet_dfs['gene'].apply(lambda x: defn(x))
         sheet_dfs.to_excel(enhancerfile,index=False)
         self.enhancers=sheet_dfs
 
@@ -265,7 +293,57 @@ class Annotation():
         ##Most Mammalian mRNAs Are Conserved Targets of MicroRNAs 
         ##Robin C Friedman, Kyle Kai-How Farh, Christopher B Burge, David P Bartel.     
         ##Genome Research, 19:92-105 (2009). 
+        mirnafile=os.path.join(self.prefix,"Processed",self.fileprefix+"_mirna.xlsx")
+        if os.path.exists(mirnafile):
+            print "miRNA file exists"
+            return
+        
         site_scores=os.path.join(self.prefix,"Conserved_Site_Scores.txt")
+        ##Gene ID Gene Symbol     Species ID      miRNA   Site type       UTR_start       UTR_end 3pairing_contr  local_AU_contr  position_contr  context_score   context_percentile
+        mirna_totals=defaultdict(int)
+        mirna_types=defaultdict(list)
+        mirna_targets=defaultdict(list)
+
+        mirna_best_target={}
+        with open(site_scores) as mir:
+            header=mir.readline().strip().split("\t")
+            for line in mir:
+                data=line.strip().split("\t")
+                uid,symbol,species,miRNA,sitetype,utr_start,utr_end,pairing_contr,local_AU_contr,position_contr,context_score,context_percentile=data
+                try:
+                    int(context_percentile)
+                    mgi=self.symbol2mgi[symbol]
+                except (KeyError,ValueError):
+                    continue
+                target=utr_start+'_'+utr_end
+                if species == '10090':
+                    mirna_totals[mgi]+=1
+                    mirna_types[mgi].append(sitetype)
+                    mirna_targets[mgi].append(target)
+                if species == '10090' and int(context_percentile) >= 95:
+                    target=utr_start+'_'+utr_end
+                    if mgi in mirna_best_target:
+                        if target in mirna_best_target[mgi]:
+                            mirna_best_target[mgi][utr_start+'_'+utr_end].append([context_percentile,miRNA,sitetype])
+                        else:
+                            mirna_best_target[mgi][utr_start+'_'+utr_end]=[[context_percentile,miRNA,sitetype]]
+                    else:
+                        mirna_best_target[mgi]={utr_start+'_'+utr_end:[[context_percentile,miRNA,sitetype]]}
+
+        ##will create data frame 
+        ##mgiID    no_miRNA    no_total_target_sites   type1   type2 type3   no_high_confidence_sites   total_targets-hothits
+        columns=['MGI_ID','num_miRNA','no_total_sites','no_type1','no_type2','no_type3','no_high_confidence_sites','no_total_minus_high_confidence']
+        outdata=[]
+        for j,k in mirna_totals.iteritems():
+            try:
+                hothit=mirna_best_target[j]
+            except KeyError:
+                hothit=[]
+                
+            outdata.append([j,k,len(set(mirna_targets[j])),mirna_types[j].count('1'),mirna_types[j].count('2'),mirna_types[j].count('3'),len(hothit),len(set(mirna_targets[j]))-len(hothit)])
+        df=pd.DataFrame(outdata,columns=columns)
+        df.to_excel(mirnafile,index=False)
+
     
     def add_regulatory(self):
         assert self.link_ids_, "Must link ids prior to annotation at gene level"
@@ -314,28 +392,34 @@ class Annotation():
             def func(bp):
                 return int((bp-min(startrow))*len(startrow)/float(max(startrow)-min(startrow)))
             models[c]=func
-
-        completed=[]
-        kk=0
-        for g,gene in self.genes.iteritems():
             
-            slcd=container[gene.chromosome]#[slicestart:sliceend]
-            #print gene.mgi,"\t",gene.length,"\t",len(slcd),len(container[gene.chromosome]),"\t\t",slicestart,sliceend,"\t\t",gene.start,gene.end
-            completed.append(gene.mgi)
-            for s in slcd:
-                if gene.start <= s[1] and s[0] < gene.end:
+            
+        reg_gene=defaultdict(list)
+        reg_size=defaultdict(list)
+    
+        for g,gene in self.genes.iteritems():
+            scld=container[gene.chromosome]
+            for s in scld:
+                start,end,regtype=s
+                if gene.start <= end and start < gene.end:
                     gene.regulatory.append(s)
-            kk+=1
-            if kk%1000 == 0:
-                print kk,round(kk/len(self.genes),3)
+                    reg_gene[v.mgi].append(regtype)
+                    reg_size[v.mgi].append(abs(end-start))
+    
+        reg_types=['H3K27me3', 'H3K36me3', 'H3K4me1', 'H3K9me3', 'PolII']
+        columns=['MGI_ID','num_annotated']+reg_types+['max_size','min_size','total_bp']
+        retdata=[]
+        for k,j in reg_gene.iteritems():
+            retdata.append([k,len(j),j.count('H3K27me3'), j.count('H3K36me3'), j.count('H3K4me1'), j.count('H3K9me3'), j.count('PolII'),max(reg_size[k]),min(reg_size[k]),sum(reg_size[k])])
+        newdf=pd.DataFrame(retdata,columns=columns)
+        newdf.to_excel(os.path.join(self.prefix,"Processed","regulatory.xlsx"))
+
         self.regflag=True        
         filename=os.path.join(self.prefix,"Processed",self.fileprefix+"_Genelist.pkl")
         filehandler=open(filename,'wb')
         dump(self.genes,filehandler)
         filehandler.close()
         
-        
-        #6829001 total rows
 
 
     def generate_sequences(self):
@@ -345,6 +429,104 @@ class Annotation():
         
         import ast
         import requests
+        from itertools import islice        
+        import math
+        import numpy as np
+        
+        
+        sequences=load(open(os.path.join(self.prefix,"Processed","Sequences.pkl"),'rb'))    
+        
+        def window(seq, n=200):
+            "Returns a sliding window (of width n) over data from the iterable"
+            it = iter(seq)
+            result = tuple(islice(it, n))
+            if len(result) == n:
+                yield result    
+            for elem in it:
+                result = result[1:] + (elem,)
+                yield result
+        
+        def percentGC(seq):
+            gc=seq.count('G')+seq.count('C')
+            try:
+                content=gc/float(len(seq))
+            except ZeroDivisionError:
+                return 0
+            return content
+        
+        
+        def CpGisland(seq):
+            lclFC=percentGC(seq)
+            observed=seq.count('CG')
+            c=seq.count('C')
+            g=seq.count('G')
+            try:
+                expected=((c+g)/2.)**2/200.
+                ratio=observed/float(expected)
+            except ZeroDivisionError:
+                ratio=0  
+            if lclFC > 0.5 and ratio > 0.6:
+                return 1
+            else:
+                return 0
+
+        def entropy(string):
+                # get probability of chars in string
+                prob = [ float(string.count(c)) / len(string) for c in dict.fromkeys(list(string)) ]
+                # calculate the entropy
+                entropy = - sum([ p * math.log(p) / math.log(2.0) for p in prob ])
+                return entropy  
+        
+        inputfile="C:/Users/CLARG38/Downloads/PlayDate/Aggregated.xlsx"
+        maindf=pd.read_excel(inputfile)
+        seqinfo={}
+        capture=[]
+        cols=['MGI_ID','Length','GCcontent','CpGsites','PercentageCpG','Num_Window','minEntropy','Num_lowEntropy_Window']
+        cnt=0
+        for symbol,seqdata in sequences.iteritems():
+            try:
+                mgi=self.symbol2mgi[symbol]
+            except KeyError:
+                try:
+                    mgi=self.ensembl2mgi[seqdata[2]]
+                except KeyError:
+                    pass
+            try: 
+                mgi
+            except NameError: 
+                continue
+            sequence=seqdata[1]
+            if not len(sequence):
+                continue
+            splitLarge=["".join(x) for x in window(sequence, 200)]
+            CpGislands=map(lambda l: CpGisland(l),splitLarge)
+            Einfo=map(lambda l: entropy(l),splitLarge)
+            try:
+                CpGcoverage=sum(CpGislands)/float(len(CpGislands))
+            except ZeroDivisionError:
+                CpGcoverage=0
+            LowEntropy=filter(lambda e: e < 1,Einfo)
+            GCcontent=percentGC(sequence)
+            try:
+                minE=min(Einfo)
+            except ValueError:
+                minE=1.92
+            capture.append([mgi,len(sequence),GCcontent,sum(CpGislands),CpGcoverage,len(CpGislands),minE,len(LowEntropy)])    
+            cnt+=1
+        #print capture
+        print len(capture[0])
+        df=pd.DataFrame(capture,columns=cols)
+        df.to_excel(os.path.join(self.prefix,"Processed","_Sequences.xlsx")) 
+            ##each 'value' has (symbol,sequence,ensemblID)
+        return
+    
+    
+        for i,j in sequences.iteritems():
+            print ">"+i
+            print j
+            print "\n\n"
+            break
+        return
         
         seqfile=os.path.join(self.prefix,"Processed",self.fileprefix+"_Sequences.pkl")
         if os.path.exists(seqfile):
@@ -398,40 +580,48 @@ class Annotation():
         dump(self.sequences,io)
         io.close()
 
+    
+    
+    def add_ppi(self):
+
+        assert self.fileprefix == '_all', "Must include all genes"
         
-    def add_ppi():
-
-        MGInet=os.path.join(self.prefix,"MGI_ppi.tab")
-
+        MGInet=os.path.join(self.prefix,"10090.protein.links.v11.0.txt")
+        degreefile=os.path.join(self.prefix,"Processed",self.fileprefix+"_geneDegree.pkl")
+        if os.path.exists(degreefile):
+            print "Degree file already exists..."
+            return 
+        
         import networkx as nx
         G=nx.Graph()
         import numpy as np
         import scipy.stats as st
         degree=defaultdict(int)
+        
         with open(MGInet) as mgi:
+            mgi.next()
             for line in mgi:
                 data=line.strip().split()
-                G.add_edge(data[0],data[1])
-                degree[data[0]]+=1
-                degree[data[1]]+=1
+                try:
+                    p1=self.protein2mgi[data[0].split(".")[1]]
+                    p2=self.protein2mgi[data[1].split(".")[1]]
+                except KeyError:
+                    continue
+                G.add_edge(p1,p2)
+                degree[p1]+=1
+                degree[p2]+=1
         dc=nx.degree_centrality(G)
-        Cv,Cl,Cs=[],[],[]
-        for j,k in dc.iteritems():
-            if j in viable:
-                print j,k
-                Cv.append(k)
-            elif j in lethal:
-                Cl.append(k)
-            elif j in sub:
-                Cs.append(k)
+        degrees={}
+        for j, k in dc.iteritems():
+            self.genes[j].degree_centrality=k
+            self.genes[j].degree=degree[j]
+            degrees[j]=[k,degree[j]]
+        self.degreeflag=True
 
-        ##As expected higher degree in Lethal > Subviable > Viable
-        print np.mean(Cv),np.mean(Cs),np.mean(Cl)
-
-        Cv.sort()
-        Cl.sort()
-
-
+        outfile=open(degreefile,'wb')
+        dump(degrees,outfile)
+        outfile.close()
+        
 class Gene(Annotation):
     
     """Creating a data construct that will capture all information about a gene.
@@ -464,29 +654,33 @@ class Gene(Annotation):
         
 
         self.regulatory=[]
-        
-        
+
+
+def grab_sequences(excelfile):
+    filedf=pd.read_excel(excelfile)
+    ##get list of genes - convert to string from numpy returned unicode
+    symbols=list(map(lambda s: str(s),filedf['Gene Marker Symbol_x'].values))
+    return symbols
         
 if __name__ == "__main__":
     
     ##If we add a list of genes, we compile for only these
     #
-    mylist=['MGI:1923631',
-        'MGI:1921468',
-        'MGI:1916649',
-        'MGI:1925664',
-        'MGI:1919828',
-        'MGI:1914642',
-        'MGI:1924311',
-        'MGI:2149781',
-        'MGI:1918645',
-        'MGI:1924955']
+    inputfile="C:/Users/CLARG38/Downloads/PlayDate/Aggregated.xlsx"
+    genelist=grab_sequences(inputfile)
+    #print genelist[:20]
     
     ann=Annotation()
     ann.link_ids()
-#    ann.add_lncrna()
-#    ann.add_encode()
+    #annotations=open(write)
+    #ann.add_ppi()
+    #ann.add_miRNA()
+    #g_reg=load(open(os.path.join(ann.prefix,"Processed","_Gene_Regulatory.pkl"),'rb')) #  ;)
+    
+    #print len(g_reg),len(filter(lambda s: s.startswith("MGI"),g_reg.keys()))
+    #ann.add_lncrna()
+    #ann.add_encode()
     #ann.add_regulatory()
-    ann.generate_sequences()
+    #ann.generate_sequences()
 
         
